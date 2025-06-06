@@ -28,53 +28,15 @@ A CalDAV Model Context Protocol (MCP) server to expose calendar operations as to
 npm install
 ```
 
-1. Create a `.env` file in the project root with your CalDAV credentials:
-
-{
-  "mcpServers": {
-    ...,
-    "calendar": {
-      "command": "npx",
-      "args": [
-        "caldav-mcp"
-      ],
-      "env": {
-        "CALDAV_BASE_URL": "[CalDAV server URL]",
-        "CALDAV_USERNAME": "`<CalDAV username>`",
-        "CALDAV_PASSWORD": "<CalDAV password>",
-        // Example: Use all calendars under /shared-calendars/
-        "CALDAV_CALENDAR_PATH": "/shared-calendars/"
-      }
-    }
-  }
-}
+2. Create a `.env` file in the project root with your CalDAV credentials:
 
 ```env
 CALDAV_BASE_URL=<CalDAV server URL>
 CALDAV_USERNAME=<CalDAV username>
-CALDAV_PASSWORD=<CalDAV password>
+CALDAV_PASSWORD=<CALDAV_PASSWORD>
 ```
 
 ## Setup in Claude Desktop
-
-{
-  "mcpServers": {
-    ...,
-    "calendar": {
-      "command": "npx",
-      "args": [
-        "caldav-mcp"
-      ],
-      "env": {
-        "CALDAV_BASE_URL": "<CalDAV server URL>",
-        "CALDAV_USERNAME": "`<CalDAV username>`",
-        "CALDAV_PASSWORD": "<CalDAV password>",
-        // Example: Use all calendars under /shared-calendars/
-        "CALDAV_CALENDAR_PATH": "/shared-calendars/"
-      }
-    }
-  }
-}
 
 ```json
 {

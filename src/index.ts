@@ -1,18 +1,20 @@
 #!/usr/bin/env node
 
-import 'dotenv/config'
-import { CalDAVClient } from "ts-caldav";
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { z } from "zod";
-import { DateTime } from "luxon";
-
-const server = new McpServer({
-  name: "caldav-mcp",
-  version: "0.1.0"
-});
+import 'dotenv/config';
 
 async function main() {
+  // Exit gracefully if required env vars are not set
+  if (!process.env.CALDAV_BASE_URL || !process.env.CALDAV_USERNAME || !process.env.CALDAV_PASSWORD) {
+    console.error(
+      "Missing CalDAV configuration. Please set CALDAV_BASE_URL, CALDAV_USERNAME, and CALDAV_PASSWORD in your environment or .env file."
+    );
+    process.exit(0); // Exit gracefully
+  }
+
+  console.log("CALDAV_BASE_URL:", process.env.CALDAV_BASE_URL);
+  console.log("CALDAV_USERNAME:", process.env.CALDAV_USERNAME);
+  console.log("CALDAV_PASSWORD:", process.env.CALDAV_PASSWORD ? "set" : "not set");
+
   const client = await CalDAVClient.create({
     baseUrl: process.env.CALDAV_BASE_URL || "",
     auth: {
@@ -43,17 +45,18 @@ async function main() {
     throw new Error(`No calendars found matching path: ${calendarPath}`);
   }
 
-  function findCalendar(calendars, query) {
+  function findCalendar(
+    calendars: Array<{ url: string; displayName?: string; description?: string; color?: string }>,
+    query: string
+  ): { url: string; displayName?: string; description?: string; color?: string } | null {
     if (!query) return null;
-    // Exact match
-    let cal = calendars.find(cal => cal.url === query || cal.displayName === query);
+    let cal = calendars.find((cal) => cal.url === query || cal.displayName === query);
     if (cal) return cal;
-    // Partial/fuzzy match
-    cal = calendars.find(cal =>
+    cal = calendars.find((cal) =>
       cal.url.toLowerCase().includes(query.toLowerCase()) ||
       (cal.displayName && cal.displayName.toLowerCase().includes(query.toLowerCase()))
     );
-    return cal;
+    return cal || null;
   }
 
   server.tool(
@@ -291,13 +294,14 @@ async function main() {
         content: [{
           type: "text",
           text: pagedEvents.length
-            ? pagedEvents.map(e => `${e.summary}\nStart: ${e.start}\nEnd: ${e.end}`).join("\n")
+            ? pagedEvents.map((e: any) => `${e.summary}\nStart: ${e.start}\nEnd: ${e.end}`).join("\n")
             : "No events found for this range."
         }]
       };
     }
   );
 
+  // --- get-event ---
   server.tool(
     "get-event",
     {
@@ -307,16 +311,15 @@ async function main() {
     async ({ uid, calendar }) => {
       let selectedCalendar;
       if (calendar) {
-        selectedCalendar = matchedCalendars.find(cal => cal.url === calendar || cal.displayName === calendar);
+        selectedCalendar = findCalendar(matchedCalendars, calendar);
         if (!selectedCalendar) throw new Error(`Calendar not found: ${calendar}`);
       } else {
         selectedCalendar =
-          matchedCalendars.find(cal =>
-            cal.url.includes(process.env.CALDAV_USERNAME || "") ||
-            cal.displayName === process.env.CALDAV_USERNAME
-          ) || matchedCalendars[0];
+          findCalendar(matchedCalendars, process.env.CALDAV_USERNAME || "") || matchedCalendars[0];
       }
-      const event = await client.getEvent(selectedCalendar.url, uid);
+      // There is no client.getEvent, so fetch all events and filter by UID
+      const events = await client.getEvents(selectedCalendar.url);
+      const event = events.find((e: any) => e.uid === uid);
       if (!event) {
         return { content: [{ type: "text", text: "Event not found." }] };
       }
@@ -324,13 +327,14 @@ async function main() {
         content: [
           {
             type: "text",
-            text: `Event:\nSummary: ${event.summary}\nStart: ${event.start}\nEnd: ${event.end}\nUID: ${event.uid}${event.rrule ? `\nRecurrence: ${event.rrule}` : ""}${event.attendees ? `\nAttendees: ${event.attendees.join(", ")}` : ""}`
+            text: `Event:\nSummary: ${event.summary}\nStart: ${event.start}\nEnd: ${event.end}\nUID: ${event.uid}${(event as any)?.rrule ? `\nRecurrence: ${(event as any).rrule}` : ""}${Array.isArray((event as any).attendees) ? `\nAttendees: ${(event as any).attendees.join(", ")}` : ""}`
           }
         ]
       };
     }
   );
 
+  // --- delete-event ---
   server.tool(
     "delete-event",
     {
@@ -361,6 +365,7 @@ async function main() {
     }
   );
 
+  // --- update-event ---
   server.tool(
     "update-event",
     {
@@ -370,29 +375,61 @@ async function main() {
       end: z.string().datetime().optional(),
       calendar: z.string().optional()
     },
-    async ({ uid, summary, start, end, calendar }) => {
+    async ({
+      uid,
+      summary,
+      start,
+      end,
+      calendar,
+    }: {
+      uid: string;
+      summary?: string;
+      start?: string;
+      end?: string;
+      calendar?: string;
+    }) => {
       let selectedCalendar;
       if (calendar) {
-        selectedCalendar = matchedCalendars.find(cal => cal.url === calendar || cal.displayName === calendar);
+        selectedCalendar = findCalendar(matchedCalendars, calendar);
         if (!selectedCalendar) throw new Error(`Calendar not found: ${calendar}`);
       } else {
         selectedCalendar =
-          matchedCalendars.find(cal =>
-            cal.url.includes(process.env.CALDAV_USERNAME || "") ||
-            cal.displayName === process.env.CALDAV_USERNAME
-          ) || matchedCalendars[0];
+          findCalendar(matchedCalendars, process.env.CALDAV_USERNAME || "") || matchedCalendars[0];
       }
-      const updates: any = {};
-      if (summary) updates.summary = summary;
-      if (start) updates.start = new Date(start);
-      if (end) updates.end = new Date(end);
+      // There is no client.updateEvent, so delete and re-create the event
+      const events = await client.getEvents(selectedCalendar.url);
+      const event = events.find((e: any) => e.uid === uid);
+      if (!event) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "Event not found."
+            }
+          ]
+        };
+      }
 
-      const updatedEvent = await client.updateEvent(selectedCalendar.url, uid, updates);
+      // Prepare updated fields
+      const updatedSummary = summary ?? event.summary;
+      const updatedStart = start ? new Date(start) : new Date(event.start);
+      const updatedEnd = end ? new Date(end) : new Date(event.end);
+
+      // Delete the old event
+      await client.deleteEvent(selectedCalendar.url, uid);
+
+      // Create a new event with the updated details
+      const newEvent = await client.createEvent(selectedCalendar.url, {
+        summary: updatedSummary,
+        start: updatedStart,
+        end: updatedEnd,
+      });
+
       return {
         content: [
           {
             type: "text",
-            text: `Event updated:\nSummary: ${updatedEvent.summary}\nStart: ${updatedEvent.start}\nEnd: ${updatedEvent.end}\nUID: ${updatedEvent.uid}`
+            text: `Event updated:\nSummary: ${updatedSummary}\nStart: ${updatedStart.toISOString()}\nEnd: ${updatedEnd.toISOString()}\nUID: ${newEvent.uid}`
           }
         ]
       };
@@ -424,7 +461,7 @@ async function main() {
         )
       ).flat();
 
-      const filteredEvents = allEvents.filter(event =>
+      const filteredEvents = allEvents.filter((event: any) =>
         (event.summary && event.summary.toLowerCase().includes(query.toLowerCase())) ||
         (event.description && event.description.toLowerCase().includes(query.toLowerCase()))
       );
@@ -449,7 +486,7 @@ async function main() {
         await client.getCalendars();
         return { content: [{ type: "text", text: "CalDAV server is reachable and healthy." }] };
       } catch (e) {
-        return { content: [{ type: "text", text: `Health check failed: ${e.message}` }] };
+        return { content: [{ type: "text", text: `Health check failed: ${e instanceof Error ? e.message : String(e)}` }] };
       }
     }
   );
@@ -461,7 +498,7 @@ async function main() {
       end: z.string().datetime(),
       calendar: z.string().optional()
     },
-    async ({ start, end, calendar }) => {
+    async ({ start, end, calendar }: { start: string; end: string; calendar?: string }) => {
       let selectedCalendar;
       if (calendar) {
         selectedCalendar = findCalendar(matchedCalendars, calendar);
@@ -525,10 +562,9 @@ async function main() {
           return eventStart <= endDate && eventEnd >= startDate;
         });
       }
-      // Assume each event has an .ics property or use your client's export method
-      const icsData = events.map(e => e.ics || "").join("\n");
+      // ICS export is not supported by the current CalDAV client.
       return {
-        content: [{ type: "text", text: icsData || "No events to export." }]
+        content: [{ type: "text", text: "ICS export is not supported by the current CalDAV client." }]
       };
     }
   );
@@ -539,7 +575,7 @@ async function main() {
       calendar: z.string().optional(),
       ics: z.string()
     },
-    async ({ calendar, ics }) => {
+    async ({ calendar, ics }: { calendar?: string; ics: string }) => {
       let selectedCalendar;
       if (calendar) {
         selectedCalendar = findCalendar(matchedCalendars, calendar);
@@ -548,8 +584,34 @@ async function main() {
         selectedCalendar =
           findCalendar(matchedCalendars, process.env.CALDAV_USERNAME || "") || matchedCalendars[0];
       }
-      // Assume your client has an importEvent or similar method
-      await client.importEvent(selectedCalendar.url, ics);
+      // Parse the ICS data and create the event
+      // This is a basic example; for full ICS parsing, use a library like ical.js
+      const matchSummary = ics.match(/SUMMARY:(.*)/);
+      const matchStart = ics.match(/DTSTART(?:;[^:]+)?:([^\r\n]+)/);
+      const matchEnd = ics.match(/DTEND(?:;[^:]+)?:([^\r\n]+)/);
+
+      if (!matchSummary || !matchStart || !matchEnd) {
+        throw new Error("ICS data missing SUMMARY, DTSTART, or DTEND fields.");
+      }
+
+      const summary = matchSummary[1].trim();
+      const start = matchStart[1].trim();
+      const end = matchEnd[1].trim();
+
+      // Convert to ISO string if needed
+      const startDate = DateTime.fromFormat(start, "yyyyMMdd'T'HHmmss", { zone: "utc" }).isValid
+        ? DateTime.fromFormat(start, "yyyyMMdd'T'HHmmss", { zone: "utc" }).toJSDate()
+        : new Date(start);
+      const endDate = DateTime.fromFormat(end, "yyyyMMdd'T'HHmmss", { zone: "utc" }).isValid
+        ? DateTime.fromFormat(end, "yyyyMMdd'T'HHmmss", { zone: "utc" }).toJSDate()
+        : new Date(end);
+
+      await client.createEvent(selectedCalendar.url, {
+        summary,
+        start: startDate,
+        end: endDate,
+      });
+
       return {
         content: [{ type: "text", text: "Event imported successfully." }]
       };
@@ -561,4 +623,4 @@ async function main() {
   await server.connect(transport);
 }
 
-main()
+main();
