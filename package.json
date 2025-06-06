@@ -20,9 +20,10 @@
   "author": "Dominik Grusemann",
   "license": "MIT",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.11.3",
+    "@modelcontextprotocol/sdk": "^1.12.1",
     "dotenv": "^16.5.0",
     "luxon": "^3.6.1",
+    "p-retry": "^6.2.1",
     "ts-caldav": "^0.1.6"
   },
   "devDependencies": {

@@ -1,8 +1,16 @@
 #!/usr/bin/env node
 
 import 'dotenv/config';
+import pRetry, { AbortError } from 'p-retry';
+import { DateTime } from 'luxon';
+import { z } from 'zod';
+import { StdioServerTransport, MCPServer } from '@modelcontextprotocol/sdk';
+import { CalDAVClient } from 'ts-caldav';
 
-async function main() {
+
+const server = new MCPServer();
+
+async function main(): Promise<void> {
   // Exit gracefully if required env vars are not set
   if (!process.env.CALDAV_BASE_URL || !process.env.CALDAV_USERNAME || !process.env.CALDAV_PASSWORD) {
     console.error(
@@ -15,19 +23,40 @@ async function main() {
   console.log("CALDAV_USERNAME:", process.env.CALDAV_USERNAME);
   console.log("CALDAV_PASSWORD:", process.env.CALDAV_PASSWORD ? "set" : "not set");
 
-  const client = await CalDAVClient.create({
-    baseUrl: process.env.CALDAV_BASE_URL || "",
-    auth: {
-      type: "basic",
-      username: process.env.CALDAV_USERNAME || "",
-      password: process.env.CALDAV_PASSWORD || ""
-    }
-  });
+  async function connectWithRetry(): Promise<any> {
+    return await pRetry(
+      async (): Promise<any> => {
+        const client = await CalDAVClient.create({
+          baseUrl: process.env.CALDAV_BASE_URL || "",
+          auth: {
+            type: "basic",
+            username: process.env.CALDAV_USERNAME || "",
+            password: process.env.CALDAV_PASSWORD || ""
+          },
+        });
+        // Try fetching calendars to verify connection
+        await client.getCalendars();
+        return client;
+      },
+      {
+        retries: 3,
+        onFailedAttempt: (error: any) => {
+          // Only retry on network/5xx errors
+          if (error.message.includes('401') || error.message.includes('403')) {
+            throw new AbortError('Authentication failed, not retrying.');
+          }
+          console.warn(`Attempt ${error.attemptNumber} failed. There are ${error.retriesLeft} retries left.`);
+        }
+      }
+    );
+  }
 
-  const calendars = await client.getCalendars();
+  const client: any = await connectWithRetry();
+
+  const calendars: Array<{ url: string; displayName?: string; description?: string; color?: string }> = await client.getCalendars();
 
   // Support calendar path or prefix via env
-  const calendarPath = process.env.CALDAV_CALENDAR_PATH || "";
+  const calendarPath: string = process.env.CALDAV_CALENDAR_PATH || "";
   let matchedCalendars: Array<{ url: string; displayName?: string; description?: string; color?: string }>;
 
   if (calendarPath.endsWith("/")) {
@@ -50,9 +79,9 @@ async function main() {
     query: string
   ): { url: string; displayName?: string; description?: string; color?: string } | null {
     if (!query) return null;
-    let cal = calendars.find((cal) => cal.url === query || cal.displayName === query);
+    let cal = calendars.find((cal: { url: string; displayName?: string }) => cal.url === query || cal.displayName === query);
     if (cal) return cal;
-    cal = calendars.find((cal) =>
+    cal = calendars.find((cal: { url: string; displayName?: string }) =>
       cal.url.toLowerCase().includes(query.toLowerCase()) ||
       (cal.displayName && cal.displayName.toLowerCase().includes(query.toLowerCase()))
     );
@@ -65,31 +94,43 @@ async function main() {
       summary: z.string(),
       start: z.string().datetime(),
       end: z.string().datetime(),
-      calendar: z.string().optional(), // <-- Add calendar parameter
+      calendar: z.string().optional(),
       timezone: z.string().optional()
     },
-    async ({summary, start, end, calendar, timezone}) => {
-      let selectedCalendar;
+    async ({
+      summary,
+      start,
+      end,
+      calendar,
+      timezone
+    }: {
+      summary: string;
+      start: string;
+      end: string;
+      calendar?: string;
+      timezone?: string;
+    }) => {
+      let selectedCalendar: { url: string; displayName?: string; description?: string; color?: string };
       if (calendar) {
-        selectedCalendar = matchedCalendars.find(cal => cal.url === calendar || cal.displayName === calendar);
+        selectedCalendar = matchedCalendars.find((cal: { url: string; displayName?: string }) => cal.url === calendar || cal.displayName === calendar)!;
         if (!selectedCalendar) throw new Error(`Calendar not found: ${calendar}`);
       } else {
         // Try to match username, fallback to first
         selectedCalendar =
-          matchedCalendars.find(cal =>
+          matchedCalendars.find((cal: { url: string; displayName?: string }) =>
             cal.url.includes(process.env.CALDAV_USERNAME || "") ||
             cal.displayName === process.env.CALDAV_USERNAME
           ) || matchedCalendars[0];
       }
-      const eventStart = timezone ? DateTime.fromISO(start, { zone: timezone }).toJSDate() : new Date(start);
-      const eventEnd = timezone ? DateTime.fromISO(end, { zone: timezone }).toJSDate() : new Date(end);
-      const event = await client.createEvent(selectedCalendar.url, {
+      const eventStart: Date = timezone ? DateTime.fromISO(start, { zone: timezone }).toJSDate() : new Date(start);
+      const eventEnd: Date = timezone ? DateTime.fromISO(end, { zone: timezone }).toJSDate() : new Date(end);
+      const event: any = await client.createEvent(selectedCalendar.url, {
         summary: summary,
         start: eventStart,
         end: eventEnd,
       });
       return {
-        content: [{type: "text", text: event.uid}]
+        content: [{ type: "text", text: event.uid }]
       };
     }
   );
@@ -104,42 +145,54 @@ async function main() {
       limit: z.number().optional(),
       offset: z.number().optional()
     },
-    async ({start, end, calendar, limit, offset}) => {
+    async ({
+      start,
+      end,
+      calendar,
+      limit,
+      offset
+    }: {
+      start: string;
+      end: string;
+      calendar?: string;
+      limit?: number;
+      offset?: number;
+    }) => {
       let calendarsToQuery: typeof matchedCalendars;
       if (calendar) {
-        const found = matchedCalendars.find(cal => cal.url === calendar || cal.displayName === calendar);
+        const found = matchedCalendars.find((cal: { url: string; displayName?: string }) => cal.url === calendar || cal.displayName === calendar);
         if (!found) throw new Error(`Calendar not found: ${calendar}`);
         calendarsToQuery = [found];
       } else {
-        const userCal = matchedCalendars.find(cal =>
+        const userCal = matchedCalendars.find((cal: { url: string; displayName?: string }) =>
           cal.url.includes(process.env.CALDAV_USERNAME || "") ||
           cal.displayName === process.env.CALDAV_USERNAME
         );
         calendarsToQuery = userCal ? [userCal] : matchedCalendars;
       }
 
-      const allEvents = (
+      const allEvents: any[] = (
         await Promise.all(
-          calendarsToQuery.map(cal => client.getEvents(cal.url))
+          calendarsToQuery.map((cal: { url: string }) => client.getEvents(cal.url))
         )
       ).flat();
 
-      const startDate = new Date(start);
-      const endDate = new Date(end);
+      const startDate: Date = new Date(start);
+      const endDate: Date = new Date(end);
 
-      const filteredEvents = allEvents.filter(event => {
-        const eventStart = new Date(event.start);
-        const eventEnd = new Date(event.end);
+      const filteredEvents: any[] = allEvents.filter((event: any) => {
+        const eventStart: Date = new Date(event.start);
+        const eventEnd: Date = new Date(event.end);
         return eventStart <= endDate && eventEnd >= startDate;
       });
 
       // Pagination
-      const pagedEvents = filteredEvents.slice(offset || 0, (offset || 0) + (limit || 100));
+      const pagedEvents: any[] = filteredEvents.slice(offset || 0, (offset || 0) + (limit || 100));
 
       return {
         content: [{
           type: "text",
-          text: pagedEvents.map(e => `${e.summary}\nStart: ${e.start}\nEnd: ${e.end}`).join("\n")
+          text: pagedEvents.map((e: any) => `${e.summary}\nStart: ${e.start}\nEnd: ${e.end}`).join("\n")
         }]
       };
     }
@@ -193,7 +246,7 @@ async function main() {
     {
       calendar: z.string().optional()
     },
-    async ({ calendar }) => {
+    async ({ calendar }: { calendar?: string }) => {
       let calendarsToQuery: typeof matchedCalendars;
       if (calendar) {
         const found = matchedCalendars.find(cal => cal.url === calendar || cal.displayName === calendar);
@@ -244,7 +297,7 @@ async function main() {
       limit: z.number().optional(),
       offset: z.number().optional()
     },
-    async ({ rangeType, date, calendar, limit, offset }) => {
+    async ({ rangeType, date, calendar, limit, offset }: { rangeType: string; date: string; calendar?: string; limit?: number; offset?: number }) => {
       const baseDate = new Date(date);
       let start: Date, end: Date;
 
@@ -308,7 +361,7 @@ async function main() {
       uid: z.string(),
       calendar: z.string().optional()
     },
-    async ({ uid, calendar }) => {
+    async ({ uid, calendar }: { uid: string; calendar?: string }) => {
       let selectedCalendar;
       if (calendar) {
         selectedCalendar = findCalendar(matchedCalendars, calendar);
@@ -341,7 +394,7 @@ async function main() {
       uid: z.string(),
       calendar: z.string().optional()
     },
-    async ({ uid, calendar }) => {
+    async ({ uid, calendar }: { uid: string; calendar?: string }) => {
       let selectedCalendar;
       if (calendar) {
         selectedCalendar = matchedCalendars.find(cal => cal.url === calendar || cal.displayName === calendar);
@@ -444,7 +497,7 @@ async function main() {
       limit: z.number().optional(),
       offset: z.number().optional()
     },
-    async ({ query, calendar, limit, offset }) => {
+    async ({ query, calendar, limit, offset }: { query: string; calendar?: string; limit?: number; offset?: number }) => {
       let calendarsToQuery: typeof matchedCalendars;
       if (calendar) {
         const found = findCalendar(matchedCalendars, calendar);
@@ -511,7 +564,7 @@ async function main() {
       const newStart = new Date(start);
       const newEnd = new Date(end);
 
-      const conflicts = allEvents.filter(event => {
+      const conflicts = allEvents.filter((event: any) => {
         const eventStart = new Date(event.start);
         const eventEnd = new Date(event.end);
         return eventStart < newEnd && eventEnd > newStart;
@@ -521,7 +574,7 @@ async function main() {
         content: [{
           type: "text",
           text: conflicts.length
-            ? `Conflicting events:\n${conflicts.map(e => `${e.summary}\nStart: ${e.start}\nEnd: ${e.end}`).join("\n")}`
+            ? `Conflicting events:\n${conflicts.map((e: any) => `${e.summary}\nStart: ${e.start}\nEnd: ${e.end}`).join("\n")}`
             : "No conflicts found."
         }]
       };
@@ -556,7 +609,7 @@ async function main() {
       if (start && end) {
         const startDate = new Date(start);
         const endDate = new Date(end);
-        events = events.filter(event => {
+        events = events.filter((event: any) => {
           const eventStart = new Date(event.start);
           const eventEnd = new Date(event.end);
           return eventStart <= endDate && eventEnd >= startDate;
