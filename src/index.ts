@@ -1,13 +1,25 @@
 #!/usr/bin/env node
 
-import 'dotenv/config';
+interface Calendar {
+  url: string;
+  displayName?: string; 
+  description?: string;
+  color?: string;
+}
+
+// Import MCP modules correctly
+import { MCPServer, StdioServerTransport } from './sdk-wrapper.js';
+
+import * as dotenv from 'dotenv';
 import pRetry, { AbortError } from 'p-retry';
 import { DateTime } from 'luxon';
 import { z } from 'zod';
-import { StdioServerTransport, MCPServer } from '@modelcontextprotocol/sdk';
 import { CalDAVClient } from 'ts-caldav';
 
+// Load environment variables
+dotenv.config();
 
+// Create MCP server using the properly imported class
 const server = new MCPServer();
 
 async function main(): Promise<void> {
@@ -53,11 +65,11 @@ async function main(): Promise<void> {
 
   const client: any = await connectWithRetry();
 
-  const calendars: Array<{ url: string; displayName?: string; description?: string; color?: string }> = await client.getCalendars();
+  const calendars: Array<Calendar> = await client.getCalendars();
 
   // Support calendar path or prefix via env
   const calendarPath: string = process.env.CALDAV_CALENDAR_PATH || "";
-  let matchedCalendars: Array<{ url: string; displayName?: string; description?: string; color?: string }>;
+  let matchedCalendars: Array<Calendar>;
 
   if (calendarPath.endsWith("/")) {
     // Match all calendars under the given prefix
@@ -75,9 +87,9 @@ async function main(): Promise<void> {
   }
 
   function findCalendar(
-    calendars: Array<{ url: string; displayName?: string; description?: string; color?: string }>,
+    calendars: Array<Calendar>,
     query: string
-  ): { url: string; displayName?: string; description?: string; color?: string } | null {
+  ): Calendar | null {
     if (!query) return null;
     let cal = calendars.find((cal: { url: string; displayName?: string }) => cal.url === query || cal.displayName === query);
     if (cal) return cal;
@@ -110,7 +122,7 @@ async function main(): Promise<void> {
       calendar?: string;
       timezone?: string;
     }) => {
-      let selectedCalendar: { url: string; displayName?: string; description?: string; color?: string };
+      let selectedCalendar: Calendar;
       if (calendar) {
         selectedCalendar = matchedCalendars.find((cal: { url: string; displayName?: string }) => cal.url === calendar || cal.displayName === calendar)!;
         if (!selectedCalendar) throw new Error(`Calendar not found: ${calendar}`);
@@ -676,4 +688,7 @@ async function main(): Promise<void> {
   await server.connect(transport);
 }
 
-main();
+main().catch(error => {
+  console.error("Error in main:", error);
+  process.exit(1);
+});
